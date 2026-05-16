@@ -5,9 +5,9 @@ on:
     branches: [ "main", "master", "develop" ]
   pull_request:
     branches: [ "main", "master", "develop" ]
-  # schedule:
-  #   # Run every day at midnight UTC to catch newly disclosed CVEs
-  #   - cron: "0 0 * * *"
+  schedule:
+    # Run every day at midnight UTC to catch newly disclosed CVEs
+    - cron: "0 0 * * *"
   workflow_dispatch:
 
 permissions:
@@ -19,6 +19,30 @@ env:
   PYTHON_VERSION: "3.11"
 
 jobs:
+  # ─────────────────────────────────────────────
+  # JOB 0: Pre-flight – detect repo characteristics
+  # ─────────────────────────────────────────────
+  preflight:
+    name: "🔎 Pre-flight Checks"
+    runs-on: ubuntu-latest
+    outputs:
+      has_dockerfile: ${{ steps.check.outputs.has_dockerfile }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check for Dockerfile
+        id: check
+        run: |
+          if [ -f "Dockerfile" ]; then
+            echo "has_dockerfile=true" >> "$GITHUB_OUTPUT"
+            echo "✅ Dockerfile found – container scan will run"
+          else
+            echo "has_dockerfile=false" >> "$GITHUB_OUTPUT"
+            echo "ℹ️  No Dockerfile found – skipping container scan"
+          fi
+
   # ─────────────────────────────────────────────
   # JOB 1: Bandit – Python Static Analysis (SAST)
   # ─────────────────────────────────────────────
@@ -128,7 +152,8 @@ jobs:
   trivy-image:
     name: "🐳 Trivy – Container Image Scan"
     runs-on: ubuntu-latest
-    if: ${{ hashFiles('Dockerfile') != '' }}
+    needs: preflight
+    if: needs.preflight.outputs.has_dockerfile == 'true'
 
     steps:
       - name: Checkout repository
@@ -237,7 +262,7 @@ jobs:
   scan-summary:
     name: "📋 Scan Summary"
     runs-on: ubuntu-latest
-    needs: [ bandit, trivy-fs, grype ]
+    needs: [ preflight, bandit, trivy-fs, grype, trivy-image ]
     if: always()
 
     steps:
@@ -259,5 +284,6 @@ jobs:
           echo "Jobs status:"
           echo "  Bandit  (SAST)       : ${{ needs.bandit.result }}"
           echo "  Trivy FS (deps/code) : ${{ needs.trivy-fs.result }}"
+          echo "  Trivy Image (container): ${{ needs.trivy-image.result }}"
           echo "  Grype   (SCA)        : ${{ needs.grype.result }}"
           echo "=============================================="
