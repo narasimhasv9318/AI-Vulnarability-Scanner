@@ -10,9 +10,7 @@ on:
     - cron: "0 0 * * *"
   workflow_dispatch:
 
-# Force Node.js 24 for all actions (Node 20 is deprecated from June 2026)
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   PYTHON_VERSION: "3.11"
 
 permissions:
@@ -73,7 +71,7 @@ jobs:
             --confidence-level medium \
             --format text \
             --output bandit-report.txt \
-            || true   # Don't fail – findings are reported via artifact
+            || true
 
       - name: Print Bandit summary
         if: always()
@@ -112,25 +110,28 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Install Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin
+
       - name: Run Trivy filesystem scan (table – informational)
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: fs
-          scan-ref: "."
-          format: table
-          severity: "CRITICAL,HIGH,MEDIUM"
-          exit-code: "0"   # Never block; surface as artifact
+        run: |
+          trivy fs . \
+            --severity CRITICAL,HIGH,MEDIUM \
+            --exit-code 0 \
+            --format table \
+            || true
 
       - name: Run Trivy filesystem scan (JSON report)
-        uses: aquasecurity/trivy-action@master
         if: always()
-        with:
-          scan-type: fs
-          scan-ref: "."
-          format: json
-          output: trivy-fs-results.json
-          severity: "CRITICAL,HIGH,MEDIUM"
-          exit-code: "0"
+        run: |
+          trivy fs . \
+            --severity CRITICAL,HIGH,MEDIUM \
+            --exit-code 0 \
+            --format json \
+            > trivy-fs-results.json 2>&1 \
+            || true
 
       - name: Upload Trivy FS report
         uses: actions/upload-artifact@v4
@@ -154,30 +155,34 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Install Trivy
+        run: |
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin
+
       - name: Build Docker image
         run: docker build -t ai-vulnerability-scanner:${{ github.sha }} .
 
-      - name: Run Trivy image scan (table – may fail on CRITICAL/HIGH)
-        id: trivy_table
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: image
-          image-ref: ai-vulnerability-scanner:${{ github.sha }}
-          format: table
-          severity: "CRITICAL,HIGH"
-          exit-code: "1"   # Fail the pipeline on critical container vulns
-        continue-on-error: true   # Let the JSON step always run after this
-
-      - name: Run Trivy image scan (JSON report – always runs)
-        uses: aquasecurity/trivy-action@master
+      - name: Run Trivy image scan (JSON report – always runs, exit 0)
         if: always()
-        with:
-          scan-type: image
-          image-ref: ai-vulnerability-scanner:${{ github.sha }}
-          format: json
-          output: trivy-image-results.json
-          severity: "CRITICAL,HIGH,MEDIUM"
-          exit-code: "0"   # Output step must never fail
+        run: |
+          trivy image \
+            --severity CRITICAL,HIGH,MEDIUM \
+            --exit-code 0 \
+            --format json \
+            ai-vulnerability-scanner:${{ github.sha }} \
+            > trivy-image-results.json
+          echo "✅ Trivy image JSON report written"
+
+      - name: Run Trivy image scan (table – fail on CRITICAL/HIGH)
+        id: trivy_table
+        run: |
+          trivy image \
+            --severity CRITICAL,HIGH \
+            --exit-code 1 \
+            --format table \
+            ai-vulnerability-scanner:${{ github.sha }} \
+            || { echo "TRIVY_IMAGE_FAILED=true" >> "$GITHUB_ENV"; }
 
       - name: Upload Trivy image report
         uses: actions/upload-artifact@v4
@@ -187,9 +192,8 @@ jobs:
           path: trivy-image-results.json
           retention-days: 30
 
-      # Re-fail the job explicitly after the artifact is safely uploaded
       - name: Fail if CRITICAL/HIGH vulnerabilities found
-        if: steps.trivy_table.outcome == 'failure'
+        if: env.TRIVY_IMAGE_FAILED == 'true'
         run: |
           echo "❌ Trivy found CRITICAL or HIGH vulnerabilities in the container image."
           echo "   Review the trivy-image-report artifact for details."
@@ -225,21 +229,23 @@ jobs:
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
             | sh -s -- -b /usr/local/bin
 
-      - name: Run Grype scan (table – captures exit code separately)
-        id: grype_table
+      - name: Run Grype scan (table – capture criticals flag)
         run: |
-          grype dir:. \
-            --output table \
-            --fail-on critical \
+          grype dir:. --output table --fail-on critical \
             || echo "GRYPE_FOUND_CRITICALS=true" >> "$GITHUB_ENV"
 
-      - name: Run Grype scan (JSON report – always runs)
+      - name: Run Grype scan (JSON report – stdout redirect, always runs)
         if: always()
         run: |
-          grype dir:. \
-            --output json \
-            --file grype-results.json \
-            || true   # Exit code ignored here; we only need the file
+          # Use stdout redirect to guarantee file is written regardless of exit code
+          grype dir:. --output json > grype-results.json 2>/dev/null || true
+          if [ -s grype-results.json ]; then
+            echo "✅ Grype JSON report written ($(wc -c < grype-results.json) bytes)"
+          else
+            echo "⚠️  Grype JSON report is empty or missing – writing placeholder"
+            echo '{"matches":[],"source":{"type":"directory"},"note":"grype produced no output"}' \
+              > grype-results.json
+          fi
 
       - name: Upload Grype report
         uses: actions/upload-artifact@v4
@@ -249,7 +255,6 @@ jobs:
           path: grype-results.json
           retention-days: 30
 
-      # Fail the job explicitly after artifact upload if criticals were found
       - name: Fail if CRITICAL vulnerabilities found
         if: env.GRYPE_FOUND_CRITICALS == 'true'
         run: |
