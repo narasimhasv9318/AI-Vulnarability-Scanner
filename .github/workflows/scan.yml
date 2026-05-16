@@ -10,13 +10,14 @@ on:
     - cron: "0 0 * * *"
   workflow_dispatch:
 
+# Force Node.js 24 for all actions (Node 20 is deprecated from June 2026)
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  PYTHON_VERSION: "3.11"
+
 permissions:
   contents: read
-  security-events: write   # Required to upload SARIF results to GitHub Security tab
   actions: read
-
-env:
-  PYTHON_VERSION: "3.11"
 
 jobs:
   # ─────────────────────────────────────────────
@@ -61,28 +62,9 @@ jobs:
           cache: pip
 
       - name: Install Bandit
-        run: pip install bandit[sarif]
+        run: pip install bandit
 
-      - name: Run Bandit scan
-        run: |
-          bandit \
-            --recursive . \
-            --exclude ./.venv,./venv,./env,./.git,./tests \
-            --severity-level medium \
-            --confidence-level medium \
-            --format sarif \
-            --output bandit-results.sarif \
-            || true        # Don't fail the step; let SARIF upload surface findings
-
-      - name: Upload Bandit SARIF to GitHub Security
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
-        with:
-          sarif_file: bandit-results.sarif
-          category: bandit
-
-      - name: Print human-readable Bandit summary
-        if: always()
+      - name: Run Bandit scan (text report)
         run: |
           bandit \
             --recursive . \
@@ -90,14 +72,33 @@ jobs:
             --severity-level medium \
             --confidence-level medium \
             --format text \
+            --output bandit-report.txt \
+            || true   # Don't fail – findings are reported via artifact
+
+      - name: Print Bandit summary
+        if: always()
+        run: cat bandit-report.txt || echo "No bandit report generated"
+
+      - name: Run Bandit scan (JSON report)
+        if: always()
+        run: |
+          bandit \
+            --recursive . \
+            --exclude ./.venv,./venv,./env,./.git,./tests \
+            --severity-level medium \
+            --confidence-level medium \
+            --format json \
+            --output bandit-report.json \
             || true
 
-      - name: Upload Bandit SARIF artifact
+      - name: Upload Bandit reports
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: bandit-sarif
-          path: bandit-results.sarif
+          name: bandit-reports
+          path: |
+            bandit-report.txt
+            bandit-report.json
           retention-days: 30
 
   # ─────────────────────────────────────────────
@@ -111,38 +112,32 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Run Trivy filesystem scan (table output)
+      - name: Run Trivy filesystem scan (table – informational)
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: fs
           scan-ref: "."
           format: table
           severity: "CRITICAL,HIGH,MEDIUM"
-          exit-code: "0"   # Surface findings without failing the job
+          exit-code: "0"   # Never block; surface as artifact
 
-      - name: Run Trivy filesystem scan (SARIF output)
+      - name: Run Trivy filesystem scan (JSON report)
         uses: aquasecurity/trivy-action@master
+        if: always()
         with:
           scan-type: fs
           scan-ref: "."
-          format: sarif
-          output: trivy-fs-results.sarif
+          format: json
+          output: trivy-fs-results.json
           severity: "CRITICAL,HIGH,MEDIUM"
           exit-code: "0"
 
-      - name: Upload Trivy filesystem SARIF to GitHub Security
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
-        with:
-          sarif_file: trivy-fs-results.sarif
-          category: trivy-filesystem
-
-      - name: Upload Trivy FS artifact
+      - name: Upload Trivy FS report
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: trivy-fs-sarif
-          path: trivy-fs-results.sarif
+          name: trivy-fs-report
+          path: trivy-fs-results.json
           retention-days: 30
 
   # ─────────────────────────────────────────────
@@ -162,40 +157,43 @@ jobs:
       - name: Build Docker image
         run: docker build -t ai-vulnerability-scanner:${{ github.sha }} .
 
-      - name: Run Trivy image scan (table output)
+      - name: Run Trivy image scan (table – may fail on CRITICAL/HIGH)
+        id: trivy_table
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: image
           image-ref: ai-vulnerability-scanner:${{ github.sha }}
           format: table
           severity: "CRITICAL,HIGH"
-          exit-code: "1"   # Fail on CRITICAL/HIGH in container images
+          exit-code: "1"   # Fail the pipeline on critical container vulns
+        continue-on-error: true   # Let the JSON step always run after this
 
-      - name: Run Trivy image scan (SARIF output)
+      - name: Run Trivy image scan (JSON report – always runs)
         uses: aquasecurity/trivy-action@master
         if: always()
         with:
           scan-type: image
           image-ref: ai-vulnerability-scanner:${{ github.sha }}
-          format: sarif
-          output: trivy-image-results.sarif
+          format: json
+          output: trivy-image-results.json
           severity: "CRITICAL,HIGH,MEDIUM"
-          exit-code: "0"
+          exit-code: "0"   # Output step must never fail
 
-      - name: Upload Trivy image SARIF to GitHub Security
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
-        with:
-          sarif_file: trivy-image-results.sarif
-          category: trivy-image
-
-      - name: Upload Trivy image artifact
+      - name: Upload Trivy image report
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: trivy-image-sarif
-          path: trivy-image-results.sarif
+          name: trivy-image-report
+          path: trivy-image-results.json
           retention-days: 30
+
+      # Re-fail the job explicitly after the artifact is safely uploaded
+      - name: Fail if CRITICAL/HIGH vulnerabilities found
+        if: steps.trivy_table.outcome == 'failure'
+        run: |
+          echo "❌ Trivy found CRITICAL or HIGH vulnerabilities in the container image."
+          echo "   Review the trivy-image-report artifact for details."
+          exit 1
 
   # ─────────────────────────────────────────────
   # JOB 4: Grype – SCA Dependency Scan
@@ -208,13 +206,13 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python (for requirements.txt / poetry lock generation)
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
 
-      - name: Install dependencies (if requirements.txt exists)
+      - name: Install dependencies
         run: |
           if [ -f requirements.txt ]; then
             pip install -r requirements.txt
@@ -227,34 +225,37 @@ jobs:
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
             | sh -s -- -b /usr/local/bin
 
-      - name: Run Grype scan on filesystem (table output)
+      - name: Run Grype scan (table – captures exit code separately)
+        id: grype_table
         run: |
           grype dir:. \
-            --fail-on critical \
             --output table \
-            || true
+            --fail-on critical \
+            || echo "GRYPE_FOUND_CRITICALS=true" >> "$GITHUB_ENV"
 
-      - name: Run Grype scan on filesystem (SARIF output)
+      - name: Run Grype scan (JSON report – always runs)
+        if: always()
         run: |
           grype dir:. \
-            --output sarif \
-            --file grype-results.sarif \
-            || true
+            --output json \
+            --file grype-results.json \
+            || true   # Exit code ignored here; we only need the file
 
-      - name: Upload Grype SARIF to GitHub Security
-        uses: github/codeql-action/upload-sarif@v3
-        if: always()
-        with:
-          sarif_file: grype-results.sarif
-          category: grype
-
-      - name: Upload Grype artifact
+      - name: Upload Grype report
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: grype-sarif
-          path: grype-results.sarif
+          name: grype-report
+          path: grype-results.json
           retention-days: 30
+
+      # Fail the job explicitly after artifact upload if criticals were found
+      - name: Fail if CRITICAL vulnerabilities found
+        if: env.GRYPE_FOUND_CRITICALS == 'true'
+        run: |
+          echo "❌ Grype found CRITICAL vulnerabilities in dependencies."
+          echo "   Review the grype-report artifact for details."
+          exit 1
 
   # ─────────────────────────────────────────────
   # JOB 5: Summary – Aggregate all scan results
@@ -266,10 +267,10 @@ jobs:
     if: always()
 
     steps:
-      - name: Download all SARIF artifacts
+      - name: Download all reports
         uses: actions/download-artifact@v4
         with:
-          path: sarif-reports
+          path: scan-reports
 
       - name: Print scan summary
         run: |
@@ -277,13 +278,19 @@ jobs:
           echo "        SECURITY SCAN SUMMARY"
           echo "=============================================="
           echo ""
-          echo "Scan results are available in:"
-          echo "  → GitHub Security tab (Code scanning alerts)"
-          echo "  → Workflow artifacts (sarif-reports/)"
-          echo ""
           echo "Jobs status:"
-          echo "  Bandit  (SAST)       : ${{ needs.bandit.result }}"
-          echo "  Trivy FS (deps/code) : ${{ needs.trivy-fs.result }}"
-          echo "  Trivy Image (container): ${{ needs.trivy-image.result }}"
-          echo "  Grype   (SCA)        : ${{ needs.grype.result }}"
+          echo "  🐍 Bandit  (SAST)          : ${{ needs.bandit.result }}"
+          echo "  🔍 Trivy FS (deps/code)    : ${{ needs.trivy-fs.result }}"
+          echo "  🐳 Trivy Image (container) : ${{ needs.trivy-image.result }}"
+          echo "  ⚓ Grype   (SCA)           : ${{ needs.grype.result }}"
+          echo ""
+          echo "Reports available in workflow artifacts:"
+          echo "  → bandit-reports/bandit-report.txt"
+          echo "  → bandit-reports/bandit-report.json"
+          echo "  → trivy-fs-report/trivy-fs-results.json"
+          echo "  → trivy-image-report/trivy-image-results.json"
+          echo "  → grype-report/grype-results.json"
           echo "=============================================="
+
+      - name: List downloaded report files
+        run: find scan-reports -type f | sort || echo "No reports downloaded"
