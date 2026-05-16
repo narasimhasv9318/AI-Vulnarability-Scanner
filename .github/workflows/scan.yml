@@ -160,17 +160,19 @@ jobs:
           curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
             | sh -s -- -b /usr/local/bin
 
-      - name: Build Docker image
+      - name: Build Docker image and export to tar
         id: docker_build
         run: |
           echo "🔨 Building Docker image..."
-          # Capture full build output so failures are visible in the log
           if docker build \
               --progress=plain \
               -t ai-vulnerability-scanner:${{ github.sha }} \
               . 2>&1 | tee docker-build.log; then
             echo "BUILD_SUCCESS=true" >> "$GITHUB_ENV"
-            echo "✅ Docker build succeeded"
+            echo "✅ Docker build succeeded – saving to image.tar"
+            # Save to tar so Trivy can load it without daemon socket issues
+            docker save ai-vulnerability-scanner:${{ github.sha }} -o image.tar
+            echo "✅ Image saved to image.tar ($(du -sh image.tar | cut -f1))"
           else
             echo "BUILD_SUCCESS=false" >> "$GITHUB_ENV"
             echo "❌ Docker build failed – see log above"
@@ -185,25 +187,26 @@ jobs:
           path: docker-build.log
           retention-days: 7
 
-      - name: Run Trivy image scan (JSON report – exit 0, always writes file)
+      - name: Run Trivy image scan on tar (JSON report – exit 0, always writes file)
         if: env.BUILD_SUCCESS == 'true'
         run: |
+          # Scan the tar directly – no daemon socket needed
           trivy image \
+            --input image.tar \
             --severity CRITICAL,HIGH,MEDIUM \
             --exit-code 0 \
             --format json \
-            ai-vulnerability-scanner:${{ github.sha }} \
             > trivy-image-results.json
           echo "✅ Trivy image JSON report written ($(wc -c < trivy-image-results.json) bytes)"
 
-      - name: Run Trivy image scan (table – fail on CRITICAL/HIGH)
+      - name: Run Trivy image scan on tar (table – fail on CRITICAL/HIGH)
         if: env.BUILD_SUCCESS == 'true'
         run: |
           trivy image \
+            --input image.tar \
             --severity CRITICAL,HIGH \
             --exit-code 1 \
             --format table \
-            ai-vulnerability-scanner:${{ github.sha }} \
             || echo "TRIVY_IMAGE_FAILED=true" >> "$GITHUB_ENV"
 
       - name: Upload Trivy image report
