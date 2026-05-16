@@ -161,10 +161,32 @@ jobs:
             | sh -s -- -b /usr/local/bin
 
       - name: Build Docker image
-        run: docker build -t ai-vulnerability-scanner:${{ github.sha }} .
+        id: docker_build
+        run: |
+          echo "🔨 Building Docker image..."
+          # Capture full build output so failures are visible in the log
+          if docker build \
+              --progress=plain \
+              -t ai-vulnerability-scanner:${{ github.sha }} \
+              . 2>&1 | tee docker-build.log; then
+            echo "BUILD_SUCCESS=true" >> "$GITHUB_ENV"
+            echo "✅ Docker build succeeded"
+          else
+            echo "BUILD_SUCCESS=false" >> "$GITHUB_ENV"
+            echo "❌ Docker build failed – see log above"
+            exit 1
+          fi
 
-      - name: Run Trivy image scan (JSON report – always runs, exit 0)
-        if: always()
+      - name: Upload Docker build log (on failure)
+        uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: docker-build-log
+          path: docker-build.log
+          retention-days: 7
+
+      - name: Run Trivy image scan (JSON report – exit 0, always writes file)
+        if: env.BUILD_SUCCESS == 'true'
         run: |
           trivy image \
             --severity CRITICAL,HIGH,MEDIUM \
@@ -172,21 +194,21 @@ jobs:
             --format json \
             ai-vulnerability-scanner:${{ github.sha }} \
             > trivy-image-results.json
-          echo "✅ Trivy image JSON report written"
+          echo "✅ Trivy image JSON report written ($(wc -c < trivy-image-results.json) bytes)"
 
       - name: Run Trivy image scan (table – fail on CRITICAL/HIGH)
-        id: trivy_table
+        if: env.BUILD_SUCCESS == 'true'
         run: |
           trivy image \
             --severity CRITICAL,HIGH \
             --exit-code 1 \
             --format table \
             ai-vulnerability-scanner:${{ github.sha }} \
-            || { echo "TRIVY_IMAGE_FAILED=true" >> "$GITHUB_ENV"; }
+            || echo "TRIVY_IMAGE_FAILED=true" >> "$GITHUB_ENV"
 
       - name: Upload Trivy image report
         uses: actions/upload-artifact@v4
-        if: always()
+        if: env.BUILD_SUCCESS == 'true'
         with:
           name: trivy-image-report
           path: trivy-image-results.json
