@@ -1,0 +1,13 @@
+<html>
+<head>
+    <title>Vulnerable MCP Server</title>
+</head>
+<body>
+    <h1>Welcome</h1>
+
+    <!-- XSS VULNERABILITY -->
+    <div>
+        User Input: {{ request.args.get('name')|safe }}
+    </div>
+</body>
+</html>

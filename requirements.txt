@@ -1,0 +1,9 @@
+flask==0.12
+requests==2.19.0
+urllib3==1.24.1
+jinja2==2.10
+pyyaml==5.1
+django==1.11
+sqlalchemy==1.2.0
+cryptography==2.3
+paramiko==2.4.0

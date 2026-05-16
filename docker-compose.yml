@@ -1,0 +1,11 @@
+version: '3'
+
+services:
+  vulnerable-app:
+    build: .
+    ports:
+      - "5000:5000"
+    privileged: true
+    environment:
+      - SECRET_KEY=supersecret
+      - DB_PASSWORD=password123
