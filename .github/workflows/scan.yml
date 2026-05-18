@@ -401,7 +401,7 @@ jobs:
           echo "  🐳 Trivy Image (container) : ${{ needs.trivy-image.result }}"
           echo "  ⚓ Grype   (SCA)           : ${{ needs.grype.result }}"
           echo ""
-          echo "SARIF results uploaded to GitHub Code Scanning:"
+          echo "SARIF results uploaded to GitHub Code Scanning: "
           echo "  → Security tab → Code scanning alerts"
           echo "  → Copilot Autofix suggestions appear on PRs"
           echo ""
