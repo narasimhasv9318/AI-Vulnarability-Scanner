@@ -16,6 +16,7 @@ env:
 permissions:
   contents: read
   actions: read
+  security-events: write  # Required for SARIF uploads → Copilot Autofix
 
 jobs:
   # ─────────────────────────────────────────────
@@ -61,7 +62,7 @@ jobs:
           cache: pip
 
       - name: Install Bandit
-        run: pip install bandit
+        run: pip install bandit[sarif]
 
       - name: Run Bandit scan (text report)
         run: |
@@ -90,7 +91,26 @@ jobs:
             --output bandit-report.json \
             || true
 
-      - name: Upload Bandit reports
+      - name: Run Bandit scan (SARIF report – for Copilot Autofix)
+        if: always()
+        run: |
+          bandit \
+            --recursive . \
+            --exclude ./.venv,./venv,./env,./.git,./tests \
+            --severity-level medium \
+            --confidence-level medium \
+            --format sarif \
+            --output bandit-report.sarif \
+            || true
+
+      - name: Upload Bandit SARIF → GitHub Code Scanning (Copilot Autofix)
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: bandit-report.sarif
+          category: bandit-sast
+
+      - name: Upload Bandit reports (artifacts)
         uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -98,6 +118,7 @@ jobs:
           path: |
             bandit-report.txt
             bandit-report.json
+            bandit-report.sarif
           retention-days: 30
 
   # ─────────────────────────────────────────────
@@ -107,6 +128,7 @@ jobs:
     name: "🔍 Trivy – Filesystem Scan"
     runs-on: ubuntu-latest
     needs: preflight
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -134,12 +156,31 @@ jobs:
             > trivy-fs-results.json 2>&1 \
             || true
 
-      - name: Upload Trivy FS report
+      - name: Run Trivy filesystem scan (SARIF report – for Copilot Autofix)
+        if: always()
+        run: |
+          trivy fs . \
+            --severity CRITICAL,HIGH,MEDIUM \
+            --exit-code 0 \
+            --format sarif \
+            > trivy-fs-results.sarif \
+            || true
+
+      - name: Upload Trivy FS SARIF → GitHub Code Scanning (Copilot Autofix)
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-fs-results.sarif
+          category: trivy-filesystem
+
+      - name: Upload Trivy FS reports (artifacts)
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: trivy-fs-report
-          path: trivy-fs-results.json
+          path: |
+            trivy-fs-results.json
+            trivy-fs-results.sarif
           retention-days: 30
 
   # ─────────────────────────────────────────────
@@ -171,7 +212,6 @@ jobs:
               . 2>&1 | tee docker-build.log; then
             echo "BUILD_SUCCESS=true" >> "$GITHUB_ENV"
             echo "✅ Docker build succeeded – saving to image.tar"
-            # Save to tar so Trivy can load it without daemon socket issues
             docker save ai-vulnerability-scanner:${{ github.sha }} -o image.tar
             echo "✅ Image saved to image.tar ($(du -sh image.tar | cut -f1))"
           else
@@ -188,17 +228,34 @@ jobs:
           path: docker-build.log
           retention-days: 7
 
-      - name: Run Trivy image scan on tar (JSON report – exit 0, always writes file)
+      - name: Run Trivy image scan on tar (JSON report – exit 0)
         if: env.BUILD_SUCCESS == 'true'
         run: |
-          # Scan the tar directly – no daemon socket needed
           trivy image \
             --input image.tar \
             --severity CRITICAL,HIGH,MEDIUM \
             --exit-code 0 \
             --format json \
             > trivy-image-results.json
-          echo "✅ Trivy image JSON report written ($(wc -c < trivy-image-results.json) bytes)"
+          echo "✅ Trivy image JSON written ($(wc -c < trivy-image-results.json) bytes)"
+
+      - name: Run Trivy image scan on tar (SARIF report – for Copilot Autofix)
+        if: env.BUILD_SUCCESS == 'true'
+        run: |
+          trivy image \
+            --input image.tar \
+            --severity CRITICAL,HIGH,MEDIUM \
+            --exit-code 0 \
+            --format sarif \
+            > trivy-image-results.sarif
+          echo "✅ Trivy image SARIF written ($(wc -c < trivy-image-results.sarif) bytes)"
+
+      - name: Upload Trivy image SARIF → GitHub Code Scanning (Copilot Autofix)
+        uses: github/codeql-action/upload-sarif@v3
+        if: env.BUILD_SUCCESS == 'true'
+        with:
+          sarif_file: trivy-image-results.sarif
+          category: trivy-container-image
 
       - name: Run Trivy image scan on tar (table – fail on CRITICAL/HIGH)
         if: env.BUILD_SUCCESS == 'true'
@@ -210,12 +267,14 @@ jobs:
             --format table \
             || echo "TRIVY_IMAGE_FAILED=true" >> "$GITHUB_ENV"
 
-      - name: Upload Trivy image report
+      - name: Upload Trivy image reports (artifacts)
         uses: actions/upload-artifact@v4
         if: env.BUILD_SUCCESS == 'true'
         with:
           name: trivy-image-report
-          path: trivy-image-results.json
+          path: |
+            trivy-image-results.json
+            trivy-image-results.sarif
           retention-days: 30
 
       - name: Fail if CRITICAL/HIGH vulnerabilities found
@@ -232,6 +291,7 @@ jobs:
     name: "⚓ Grype – SCA Dependency Scan"
     runs-on: ubuntu-latest
     needs: preflight
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -263,22 +323,48 @@ jobs:
       - name: Run Grype scan (JSON report – stdout redirect, always runs)
         if: always()
         run: |
-          # Use stdout redirect to guarantee file is written regardless of exit code
           grype dir:. --output json > grype-results.json 2>/dev/null || true
           if [ -s grype-results.json ]; then
             echo "✅ Grype JSON report written ($(wc -c < grype-results.json) bytes)"
           else
-            echo "⚠️  Grype JSON report is empty or missing – writing placeholder"
+            echo "⚠️  Grype JSON report is empty – writing placeholder"
             echo '{"matches":[],"source":{"type":"directory"},"note":"grype produced no output"}' \
               > grype-results.json
           fi
 
-      - name: Upload Grype report
+      - name: Convert Grype JSON → SARIF (for Copilot Autofix)
+        if: always()
+        run: |
+          # Install grype's built-in SARIF template via anchore/grype
+          grype dir:. --output sarif > grype-results.sarif 2>/dev/null || true
+          if [ -s grype-results.sarif ]; then
+            echo "✅ Grype SARIF written ($(wc -c < grype-results.sarif) bytes)"
+          else
+            echo "⚠️  Grype SARIF is empty – writing minimal valid SARIF placeholder"
+            cat <<'EOF' > grype-results.sarif
+          {
+            "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+            "version": "2.1.0",
+            "runs": [{ "tool": { "driver": { "name": "Grype", "rules": [] } }, "results": [] }]
+          }
+          EOF
+          fi
+
+      - name: Upload Grype SARIF → GitHub Code Scanning (Copilot Autofix)
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: grype-results.sarif
+          category: grype-sca
+
+      - name: Upload Grype reports (artifacts)
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: grype-report
-          path: grype-results.json
+          path: |
+            grype-results.json
+            grype-results.sarif
           retention-days: 30
 
       - name: Fail if CRITICAL vulnerabilities found
@@ -315,12 +401,15 @@ jobs:
           echo "  🐳 Trivy Image (container) : ${{ needs.trivy-image.result }}"
           echo "  ⚓ Grype   (SCA)           : ${{ needs.grype.result }}"
           echo ""
-          echo "Reports available in workflow artifacts:"
-          echo "  → bandit-reports/bandit-report.txt"
-          echo "  → bandit-reports/bandit-report.json"
-          echo "  → trivy-fs-report/trivy-fs-results.json"
-          echo "  → trivy-image-report/trivy-image-results.json"
-          echo "  → grype-report/grype-results.json"
+          echo "SARIF results uploaded to GitHub Code Scanning:"
+          echo "  → Security tab → Code scanning alerts"
+          echo "  → Copilot Autofix suggestions appear on PRs"
+          echo ""
+          echo "Reports also available as workflow artifacts:"
+          echo "  → bandit-reports/  (txt, json, sarif)"
+          echo "  → trivy-fs-report/ (json, sarif)"
+          echo "  → trivy-image-report/ (json, sarif)"
+          echo "  → grype-report/    (json, sarif)"
           echo "=============================================="
 
       - name: List downloaded report files
