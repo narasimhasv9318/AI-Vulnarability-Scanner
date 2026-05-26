@@ -336,7 +336,7 @@ jobs:
   consolidate:
     name: "🧹 Consolidate & Deduplicate Reports"
     runs-on: ubuntu-latest
-    needs: [ bandit, trivy-fs, grype ]
+    needs: [ bandit, trivy-fs, trivy-image, grype ]
     # Run even if scan jobs failed so we always get a consolidated view
     if: always()
 
@@ -386,6 +386,8 @@ jobs:
             --grype       raw-reports/grype/grype-results.json \
             --output-json consolidated-report.json \
             --output-md   consolidated-report.md \
+            --repo        "${{ github.repository }}" \
+            --commit      "${{ github.sha }}" \
           || true   # Script exits 1 on CRITICAL/HIGH; gate job handles blocking
 
       - name: Print consolidated summary
@@ -394,8 +396,13 @@ jobs:
           echo "──────────────────────────────────────────"
           echo "  CONSOLIDATED REPORT SUMMARY"
           echo "──────────────────────────────────────────"
-          # Print first 60 lines of the markdown (summary table)
-          head -60 consolidated-report.md || true
+          # Print executive summary + severity table (first 40 lines of MD)
+          head -40 consolidated-report.md || true
+          echo ""
+          echo "Full report → download 'consolidated-report' artifact"
+          echo "  consolidated-report.json  ← for LLM agents / automation"
+          echo "  consolidated-report.md    ← for human review / PR comments"
+          echo "──────────────────────────────────────────" 
 
       - name: Upload consolidated reports
         uses: actions/upload-artifact@v4
@@ -416,7 +423,7 @@ jobs:
   security-gate:
     name: "🔐 Security Gate"
     runs-on: ubuntu-latest
-    needs: [ bandit, trivy-fs, grype, consolidate ]
+    needs: [ bandit, trivy-fs, trivy-image, grype, consolidate ]
     if: always()
 
     steps:
@@ -433,10 +440,11 @@ jobs:
           echo "         SECURITY GATE EVALUATION"
           echo "=============================================="
           echo ""
-          echo "  🐍 Bandit   : ${{ needs.bandit.result }}"
-          echo "  🔍 Trivy FS : ${{ needs.trivy-fs.result }}"
-          echo "  ⚓ Grype    : ${{ needs.grype.result }}"
-          echo "  🧹 Consolidate: ${{ needs.consolidate.result }}"
+          echo "  🐍 Bandit        : ${{ needs.bandit.result }}"
+          echo "  🔍 Trivy FS      : ${{ needs.trivy-fs.result }}"
+          echo "  🐳 Trivy Image   : ${{ needs.trivy-image.result }}"
+          echo "  ⚓ Grype         : ${{ needs.grype.result }}"
+          echo "  🧹 Consolidate   : ${{ needs.consolidate.result }}"
           echo ""
 
           FAILED=false
@@ -447,6 +455,10 @@ jobs:
           fi
           if [ "${{ needs.trivy-fs.result }}" = "failure" ]; then
             echo "  ❌ Trivy filesystem found CRITICAL/HIGH vulnerabilities"
+            FAILED=true
+          fi
+          if [ "${{ needs.trivy-image.result }}" = "failure" ]; then
+            echo "  ❌ Trivy image found CRITICAL/HIGH vulnerabilities in container"
             FAILED=true
           fi
           if [ "${{ needs.grype.result }}" = "failure" ]; then
