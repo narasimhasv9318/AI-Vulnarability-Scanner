@@ -6,12 +6,13 @@ on:
   pull_request:
     branches: [ "main", "master", "develop" ]
   schedule:
-    # Run every day at midnight UTC to catch newly disclosed CVEs
     - cron: "0 0 * * *"
   workflow_dispatch:
 
 env:
   PYTHON_VERSION: "3.11"
+  # Suppress Node.js 20 deprecation warnings across all jobs
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
   contents: read
@@ -20,7 +21,7 @@ permissions:
 
 jobs:
   # ─────────────────────────────────────────────
-  # JOB 0: Pre-flight – detect repo characteristics
+  # JOB 0: Pre-flight
   # ─────────────────────────────────────────────
   preflight:
     name: "🔎 Pre-flight Checks"
@@ -44,7 +45,8 @@ jobs:
           fi
 
   # ─────────────────────────────────────────────
-  # JOB 1: Bandit – Python Static Analysis (SAST)
+  # JOB 1: Bandit – Python SAST
+  # Blocks PR on: MEDIUM+ severity findings
   # ─────────────────────────────────────────────
   bandit:
     name: "🐍 Bandit – Python SAST"
@@ -64,65 +66,57 @@ jobs:
       - name: Install Bandit
         run: pip install bandit[sarif]
 
-      - name: Run Bandit scan (text report)
+      - name: Run Bandit (text – printed to log)
         run: |
-          bandit \
-            --recursive . \
+          bandit --recursive . \
             --exclude ./.venv,./venv,./env,./.git,./tests \
-            --severity-level medium \
-            --confidence-level medium \
-            --format text \
-            --output bandit-report.txt \
-            || true
+            --severity-level medium --confidence-level medium \
+            --format text || true
 
-      - name: Print Bandit summary
-        if: always()
-        run: cat bandit-report.txt || echo "No bandit report generated"
-
-      - name: Run Bandit scan (JSON report)
+      - name: Run Bandit (JSON artifact)
         if: always()
         run: |
-          bandit \
-            --recursive . \
+          bandit --recursive . \
             --exclude ./.venv,./venv,./env,./.git,./tests \
-            --severity-level medium \
-            --confidence-level medium \
-            --format json \
-            --output bandit-report.json \
-            || true
+            --severity-level medium --confidence-level medium \
+            --format json --output bandit-report.json || true
 
-      - name: Run Bandit scan (SARIF report – for Copilot Autofix)
+      - name: Run Bandit (SARIF → Copilot Autofix)
         if: always()
         run: |
-          bandit \
-            --recursive . \
+          bandit --recursive . \
             --exclude ./.venv,./venv,./env,./.git,./tests \
-            --severity-level medium \
-            --confidence-level medium \
-            --format sarif \
-            --output bandit-report.sarif \
-            || true
+            --severity-level medium --confidence-level medium \
+            --format sarif --output bandit-report.sarif || true
 
-      - name: Upload Bandit SARIF → GitHub Code Scanning (Copilot Autofix)
-        uses: github/codeql-action/upload-sarif@v3
+      - name: Upload Bandit SARIF → Code Scanning
+        uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
           sarif_file: bandit-report.sarif
           category: bandit-sast
 
-      - name: Upload Bandit reports (artifacts)
+      - name: Upload Bandit artifacts
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: bandit-reports
           path: |
-            bandit-report.txt
             bandit-report.json
             bandit-report.sarif
           retention-days: 30
 
+      # ── GATE ──
+      - name: "🚦 GATE – Fail if Bandit found issues"
+        run: |
+          bandit --recursive . \
+            --exclude ./.venv,./venv,./env,./.git,./tests \
+            --severity-level medium --confidence-level medium \
+            --format text
+
   # ─────────────────────────────────────────────
-  # JOB 2: Trivy – Filesystem & Dependency Scan
+  # JOB 2: Trivy – Filesystem Scan
+  # Blocks PR on: CRITICAL or HIGH findings
   # ─────────────────────────────────────────────
   trivy-fs:
     name: "🔍 Trivy – Filesystem Scan"
@@ -138,42 +132,28 @@ jobs:
           curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
             | sh -s -- -b /usr/local/bin
 
-      - name: Run Trivy filesystem scan (table – informational)
-        run: |
-          trivy fs . \
-            --severity CRITICAL,HIGH,MEDIUM \
-            --exit-code 0 \
-            --format table \
-            || true
-
-      - name: Run Trivy filesystem scan (JSON report)
+      - name: Run Trivy FS (JSON artifact)
         if: always()
         run: |
-          trivy fs . \
-            --severity CRITICAL,HIGH,MEDIUM \
-            --exit-code 0 \
-            --format json \
-            > trivy-fs-results.json 2>&1 \
-            || true
+          trivy fs . --severity CRITICAL,HIGH,MEDIUM \
+            --exit-code 0 --format json \
+            > trivy-fs-results.json 2>&1 || true
 
-      - name: Run Trivy filesystem scan (SARIF report – for Copilot Autofix)
+      - name: Run Trivy FS (SARIF → Copilot Autofix)
         if: always()
         run: |
-          trivy fs . \
-            --severity CRITICAL,HIGH,MEDIUM \
-            --exit-code 0 \
-            --format sarif \
-            > trivy-fs-results.sarif \
-            || true
+          trivy fs . --severity CRITICAL,HIGH,MEDIUM \
+            --exit-code 0 --format sarif \
+            > trivy-fs-results.sarif || true
 
-      - name: Upload Trivy FS SARIF → GitHub Code Scanning (Copilot Autofix)
-        uses: github/codeql-action/upload-sarif@v3
+      - name: Upload Trivy FS SARIF → Code Scanning
+        uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
           sarif_file: trivy-fs-results.sarif
           category: trivy-filesystem
 
-      - name: Upload Trivy FS reports (artifacts)
+      - name: Upload Trivy FS artifacts
         uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -183,9 +163,15 @@ jobs:
             trivy-fs-results.sarif
           retention-days: 30
 
+      # ── GATE ──
+      - name: "🚦 GATE – Fail if Trivy FS found CRITICAL/HIGH"
+        run: |
+          trivy fs . --severity CRITICAL,HIGH \
+            --exit-code 1 --format table
+
   # ─────────────────────────────────────────────
   # JOB 3: Trivy – Container Image Scan
-  # (only runs when a Dockerfile is present)
+  # Blocks PR on: CRITICAL or HIGH findings
   # ─────────────────────────────────────────────
   trivy-image:
     name: "🐳 Trivy – Container Image Scan"
@@ -203,21 +189,16 @@ jobs:
             | sh -s -- -b /usr/local/bin
 
       - name: Build Docker image and export to tar
-        id: docker_build
         run: |
-          echo "🔨 Building Docker image..."
-          if docker build \
-              --progress=plain \
+          if docker build --progress=plain \
               -t ai-vulnerability-scanner:${{ github.sha }} \
               . 2>&1 | tee docker-build.log; then
             echo "BUILD_SUCCESS=true" >> "$GITHUB_ENV"
-            echo "✅ Docker build succeeded – saving to image.tar"
             docker save ai-vulnerability-scanner:${{ github.sha }} -o image.tar
-            echo "✅ Image saved to image.tar ($(du -sh image.tar | cut -f1))"
+            echo "✅ Image saved ($(du -sh image.tar | cut -f1))"
           else
             echo "BUILD_SUCCESS=false" >> "$GITHUB_ENV"
-            echo "❌ Docker build failed – see log above"
-            exit 1
+            echo "❌ Docker build failed"; exit 1
           fi
 
       - name: Upload Docker build log (on failure)
@@ -228,46 +209,32 @@ jobs:
           path: docker-build.log
           retention-days: 7
 
-      - name: Run Trivy image scan on tar (JSON report – exit 0)
+      - name: Run Trivy image (JSON artifact)
         if: env.BUILD_SUCCESS == 'true'
         run: |
-          trivy image \
-            --input image.tar \
+          trivy image --input image.tar \
             --severity CRITICAL,HIGH,MEDIUM \
-            --exit-code 0 \
-            --format json \
+            --exit-code 0 --format json \
             > trivy-image-results.json
-          echo "✅ Trivy image JSON written ($(wc -c < trivy-image-results.json) bytes)"
+          echo "✅ JSON written ($(wc -c < trivy-image-results.json) bytes)"
 
-      - name: Run Trivy image scan on tar (SARIF report – for Copilot Autofix)
+      - name: Run Trivy image (SARIF → Copilot Autofix)
         if: env.BUILD_SUCCESS == 'true'
         run: |
-          trivy image \
-            --input image.tar \
+          trivy image --input image.tar \
             --severity CRITICAL,HIGH,MEDIUM \
-            --exit-code 0 \
-            --format sarif \
+            --exit-code 0 --format sarif \
             > trivy-image-results.sarif
-          echo "✅ Trivy image SARIF written ($(wc -c < trivy-image-results.sarif) bytes)"
+          echo "✅ SARIF written ($(wc -c < trivy-image-results.sarif) bytes)"
 
-      - name: Upload Trivy image SARIF → GitHub Code Scanning (Copilot Autofix)
-        uses: github/codeql-action/upload-sarif@v3
+      - name: Upload Trivy image SARIF → Code Scanning
+        uses: github/codeql-action/upload-sarif@v4
         if: env.BUILD_SUCCESS == 'true'
         with:
           sarif_file: trivy-image-results.sarif
           category: trivy-container-image
 
-      - name: Run Trivy image scan on tar (table – fail on CRITICAL/HIGH)
-        if: env.BUILD_SUCCESS == 'true'
-        run: |
-          trivy image \
-            --input image.tar \
-            --severity CRITICAL,HIGH \
-            --exit-code 1 \
-            --format table \
-            || echo "TRIVY_IMAGE_FAILED=true" >> "$GITHUB_ENV"
-
-      - name: Upload Trivy image reports (artifacts)
+      - name: Upload Trivy image artifacts
         uses: actions/upload-artifact@v4
         if: env.BUILD_SUCCESS == 'true'
         with:
@@ -277,15 +244,17 @@ jobs:
             trivy-image-results.sarif
           retention-days: 30
 
-      - name: Fail if CRITICAL/HIGH vulnerabilities found
-        if: env.TRIVY_IMAGE_FAILED == 'true'
+      # ── GATE ──
+      - name: "🚦 GATE – Fail if Trivy image found CRITICAL/HIGH"
+        if: env.BUILD_SUCCESS == 'true'
         run: |
-          echo "❌ Trivy found CRITICAL or HIGH vulnerabilities in the container image."
-          echo "   Review the trivy-image-report artifact for details."
-          exit 1
+          trivy image --input image.tar \
+            --severity CRITICAL,HIGH \
+            --exit-code 1 --format table
 
   # ─────────────────────────────────────────────
   # JOB 4: Grype – SCA Dependency Scan
+  # Blocks PR on: CRITICAL findings
   # ─────────────────────────────────────────────
   grype:
     name: "⚓ Grype – SCA Dependency Scan"
@@ -304,43 +273,29 @@ jobs:
 
       - name: Install dependencies
         run: |
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          elif [ -f pyproject.toml ]; then
-            pip install .
-          fi
+          if [ -f requirements.txt ]; then pip install -r requirements.txt
+          elif [ -f pyproject.toml ]; then pip install .; fi
 
       - name: Install Grype
         run: |
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
             | sh -s -- -b /usr/local/bin
 
-      - name: Run Grype scan (table – capture criticals flag)
-        run: |
-          grype dir:. --output table --fail-on critical \
-            || echo "GRYPE_FOUND_CRITICALS=true" >> "$GITHUB_ENV"
-
-      - name: Run Grype scan (JSON report – stdout redirect, always runs)
+      - name: Run Grype (JSON artifact)
         if: always()
         run: |
           grype dir:. --output json > grype-results.json 2>/dev/null || true
-          if [ -s grype-results.json ]; then
-            echo "✅ Grype JSON report written ($(wc -c < grype-results.json) bytes)"
-          else
-            echo "⚠️  Grype JSON report is empty – writing placeholder"
+          if [ ! -s grype-results.json ]; then
             echo '{"matches":[],"source":{"type":"directory"},"note":"grype produced no output"}' \
               > grype-results.json
           fi
+          echo "✅ Grype JSON written ($(wc -c < grype-results.json) bytes)"
 
-      - name: Convert Grype JSON → SARIF (for Copilot Autofix)
+      - name: Run Grype (SARIF → Copilot Autofix)
         if: always()
         run: |
-          # Install grype's built-in SARIF template via anchore/grype
           grype dir:. --output sarif > grype-results.sarif 2>/dev/null || true
-          if [ -s grype-results.sarif ]; then
-            echo "✅ Grype SARIF written ($(wc -c < grype-results.sarif) bytes)"
-          else
-            echo "⚠️  Grype SARIF is empty – writing minimal valid SARIF placeholder"
+          if [ ! -s grype-results.sarif ]; then
             cat <<'EOF' > grype-results.sarif
           {
             "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
@@ -349,15 +304,16 @@ jobs:
           }
           EOF
           fi
+          echo "✅ Grype SARIF written ($(wc -c < grype-results.sarif) bytes)"
 
-      - name: Upload Grype SARIF → GitHub Code Scanning (Copilot Autofix)
-        uses: github/codeql-action/upload-sarif@v3
+      - name: Upload Grype SARIF → Code Scanning
+        uses: github/codeql-action/upload-sarif@v4
         if: always()
         with:
           sarif_file: grype-results.sarif
           category: grype-sca
 
-      - name: Upload Grype reports (artifacts)
+      - name: Upload Grype artifacts
         uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -367,50 +323,206 @@ jobs:
             grype-results.sarif
           retention-days: 30
 
-      - name: Fail if CRITICAL vulnerabilities found
-        if: env.GRYPE_FOUND_CRITICALS == 'true'
+      # ── GATE ──
+      - name: "🚦 GATE – Fail if Grype found CRITICAL vulnerabilities"
         run: |
-          echo "❌ Grype found CRITICAL vulnerabilities in dependencies."
-          echo "   Review the grype-report artifact for details."
-          exit 1
+          grype dir:. --output table --fail-on critical
 
   # ─────────────────────────────────────────────
-  # JOB 5: Summary – Aggregate all scan results
+  # JOB 5: Consolidate & Deduplicate
+  # Merges all tool reports, removes duplicate
+  # findings, produces one JSON + one MD report
+  # ─────────────────────────────────────────────
+  consolidate:
+    name: "🧹 Consolidate & Deduplicate Reports"
+    runs-on: ubuntu-latest
+    needs: [ bandit, trivy-fs, trivy-image, grype ]
+    # Run even if scan jobs failed so we always get a consolidated view
+    if: always()
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Download bandit-reports
+        uses: actions/download-artifact@v4
+        with:
+          name: bandit-reports
+          path: raw-reports/bandit
+        continue-on-error: true
+
+      - name: Download trivy-fs-report
+        uses: actions/download-artifact@v4
+        with:
+          name: trivy-fs-report
+          path: raw-reports/trivy-fs
+        continue-on-error: true
+
+      - name: Download trivy-image-report
+        uses: actions/download-artifact@v4
+        with:
+          name: trivy-image-report
+          path: raw-reports/trivy-image
+        continue-on-error: true
+
+      - name: Download grype-report
+        uses: actions/download-artifact@v4
+        with:
+          name: grype-report
+          path: raw-reports/grype
+        continue-on-error: true
+
+      - name: Run consolidation script
+        run: |
+          python .github/scripts/consolidate_reports.py \
+            --bandit      raw-reports/bandit/bandit-report.json \
+            --trivy-fs    raw-reports/trivy-fs/trivy-fs-results.json \
+            --trivy-image raw-reports/trivy-image/trivy-image-results.json \
+            --grype       raw-reports/grype/grype-results.json \
+            --output-json consolidated-report.json \
+            --output-md   consolidated-report.md \
+            --repo        "${{ github.repository }}" \
+            --commit      "${{ github.sha }}" \
+          || true   # Script exits 1 on CRITICAL/HIGH; gate job handles blocking
+
+      - name: Print consolidated summary
+        if: always()
+        run: |
+          echo "──────────────────────────────────────────"
+          echo "  CONSOLIDATED REPORT SUMMARY"
+          echo "──────────────────────────────────────────"
+          # Print executive summary + severity table (first 40 lines of MD)
+          head -40 consolidated-report.md || true
+          echo ""
+          echo "Full report → download 'consolidated-report' artifact"
+          echo "  consolidated-report.json  ← for LLM agents / automation"
+          echo "  consolidated-report.md    ← for human review / PR comments"
+          echo "──────────────────────────────────────────" 
+
+      - name: Upload consolidated reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: consolidated-report
+          path: |
+            consolidated-report.json
+            consolidated-report.md
+          retention-days: 30
+
+  # ─────────────────────────────────────────────
+  # JOB 6: Security Gate (required status check)
+  # Add "🔐 Security Gate" in:
+  # Settings → Branches → Branch protection rules
+  #   → Require status checks → search this name
+  # ─────────────────────────────────────────────
+  security-gate:
+    name: "🔐 Security Gate"
+    runs-on: ubuntu-latest
+    needs: [ bandit, trivy-fs, trivy-image, grype, consolidate ]
+    if: always()
+
+    steps:
+      - name: Download consolidated report
+        uses: actions/download-artifact@v4
+        with:
+          name: consolidated-report
+          path: consolidated
+        continue-on-error: true
+
+      - name: Evaluate results and block PR if needed
+        run: |
+          echo "=============================================="
+          echo "         SECURITY GATE EVALUATION"
+          echo "=============================================="
+          echo ""
+          echo "  🐍 Bandit        : ${{ needs.bandit.result }}"
+          echo "  🔍 Trivy FS      : ${{ needs.trivy-fs.result }}"
+          echo "  🐳 Trivy Image   : ${{ needs.trivy-image.result }}"
+          echo "  ⚓ Grype         : ${{ needs.grype.result }}"
+          echo "  🧹 Consolidate   : ${{ needs.consolidate.result }}"
+          echo ""
+
+          FAILED=false
+
+          if [ "${{ needs.bandit.result }}" = "failure" ]; then
+            echo "  ❌ Bandit found MEDIUM+ severity issues in Python code"
+            FAILED=true
+          fi
+          if [ "${{ needs.trivy-fs.result }}" = "failure" ]; then
+            echo "  ❌ Trivy filesystem found CRITICAL/HIGH vulnerabilities"
+            FAILED=true
+          fi
+          if [ "${{ needs.trivy-image.result }}" = "failure" ]; then
+            echo "  ❌ Trivy image found CRITICAL/HIGH vulnerabilities in container"
+            FAILED=true
+          fi
+          if [ "${{ needs.grype.result }}" = "failure" ]; then
+            echo "  ❌ Grype found CRITICAL vulnerabilities in dependencies"
+            FAILED=true
+          fi
+
+          # Also check consolidated report for any remaining CRITICAL/HIGH
+          if [ -f consolidated/consolidated-report.json ]; then
+            CRIT_HIGH=$(python3 -c "
+          import json, sys
+          data = json.load(open('consolidated/consolidated-report.json'))
+          findings = [f for f in data.get('findings', []) if f['severity'] in ('CRITICAL','HIGH')]
+          print(len(findings))
+          ")
+            echo "  📊 Consolidated CRITICAL/HIGH findings: $CRIT_HIGH"
+            if [ "$CRIT_HIGH" -gt "0" ]; then
+              echo "  ❌ $CRIT_HIGH CRITICAL/HIGH findings in consolidated report"
+              FAILED=true
+            fi
+          fi
+
+          echo ""
+          if [ "$FAILED" = "true" ]; then
+            echo "  🚫 PR MERGE BLOCKED"
+            echo "  💡 Go to Security → Code scanning for Copilot Autofix suggestions"
+            echo "  📄 Download 'consolidated-report' artifact for full deduplicated list"
+            echo "=============================================="
+            exit 1
+          else
+            echo "  ✅ All security gates passed – PR is clear to merge"
+            echo "=============================================="
+          fi
+
+  # ─────────────────────────────────────────────
+  # JOB 7: Final Summary
   # ─────────────────────────────────────────────
   scan-summary:
     name: "📋 Scan Summary"
     runs-on: ubuntu-latest
-    needs: [ preflight, bandit, trivy-fs, grype, trivy-image ]
+    needs: [ preflight, bandit, trivy-fs, grype, trivy-image, consolidate, security-gate ]
     if: always()
 
     steps:
-      - name: Download all reports
-        uses: actions/download-artifact@v4
-        with:
-          path: scan-reports
-
-      - name: Print scan summary
+      - name: Print final summary
         run: |
           echo "=============================================="
-          echo "        SECURITY SCAN SUMMARY"
+          echo "           FINAL PIPELINE SUMMARY"
           echo "=============================================="
+          echo "  🔎 Pre-flight         : ${{ needs.preflight.result }}"
+          echo "  🐍 Bandit  (SAST)     : ${{ needs.bandit.result }}"
+          echo "  🔍 Trivy FS (deps)    : ${{ needs.trivy-fs.result }}"
+          echo "  🐳 Trivy Image        : ${{ needs.trivy-image.result }}"
+          echo "  ⚓ Grype   (SCA)      : ${{ needs.grype.result }}"
+          echo "  🧹 Consolidate/Dedup  : ${{ needs.consolidate.result }}"
+          echo "  🔐 Security Gate      : ${{ needs.security-gate.result }}"
           echo ""
-          echo "Jobs status:"
-          echo "  🐍 Bandit  (SAST)          : ${{ needs.bandit.result }}"
-          echo "  🔍 Trivy FS (deps/code)    : ${{ needs.trivy-fs.result }}"
-          echo "  🐳 Trivy Image (container) : ${{ needs.trivy-image.result }}"
-          echo "  ⚓ Grype   (SCA)           : ${{ needs.grype.result }}"
+          echo "  Artifacts produced:"
+          echo "    → bandit-reports/          (json, sarif)"
+          echo "    → trivy-fs-report/         (json, sarif)"
+          echo "    → trivy-image-report/      (json, sarif)"
+          echo "    → grype-report/            (json, sarif)"
+          echo "    → consolidated-report/     (json ✨, md ✨)"
           echo ""
-          echo "SARIF results uploaded to GitHub Code Scanning:"
-          echo "  → Security tab → Code scanning alerts"
-          echo "  → Copilot Autofix suggestions appear on PRs"
-          echo ""
-          echo "Reports also available as workflow artifacts:"
-          echo "  → bandit-reports/  (txt, json, sarif)"
-          echo "  → trivy-fs-report/ (json, sarif)"
-          echo "  → trivy-image-report/ (json, sarif)"
-          echo "  → grype-report/    (json, sarif)"
+          echo "  SARIF → Security → Code scanning alerts"
+          echo "  Copilot Autofix suggestions appear on PRs"
           echo "=============================================="
-
-      - name: List downloaded report files
-        run: find scan-reports -type f | sort || echo "No reports downloaded"
